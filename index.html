@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>G-PONG - Tight Range Edition</title>
+    <title>G-PONG - Mobile Multi-Touch</title>
     <link href="https://fonts.googleapis.com/css2?family=Michroma&display=swap" rel="stylesheet">
     <style>
         * { box-sizing: border-box; }
@@ -19,7 +19,7 @@
 <body>
     <div class="game-container">
         <canvas id="gameCanvas" width="800" height="500"></canvas>
-        <div id="msg" class="overlay-text">PRESS START BUTTON<br><span style="font-size: 14px; color: #aaa;">(A: 1P / B: 2P)</span></div>
+        <div id="msg" class="overlay-text">PRESS START BUTTON<br><span style="font-size: 14px; color: #aaa;">(LEFT: 1P / RIGHT: 2P)</span></div>
         <div id="ui" class="ui-panel">4.5</div>
     </div>
 
@@ -38,21 +38,16 @@
         const IDLE_TIME_LIMIT = 30000;
         const PADDLE_DISPLAY_Y = GROUND_Y - 45, WALL_L = LINE_THICK, WALL_R = 800 - LINE_THICK;
 
-        // --- 可動範囲の制限値 ---
-        const NET_MARGIN = 5; // ネットとの最小隙間
-        const P1_MIN_X = WALL_L;
-        const P1_MAX_X = canvas.width / 2 - PADDLE_WIDTH - NET_MARGIN; // 1Pの右限
-        const P2_MIN_X = canvas.width / 2 + NET_MARGIN;               // 2Pの左限
-        const P2_MAX_X = WALL_R - PADDLE_WIDTH;
+        const NET_MARGIN = 5;
+        const P1_MIN_X = WALL_L, P1_MAX_X = 400 - PADDLE_WIDTH - NET_MARGIN;
+        const P2_MIN_X = 400 + NET_MARGIN, P2_MAX_X = WALL_R - PADDLE_WIDTH;
 
-        let currentNetHeight = 50;
-        let player = { x: 150, score: 0 }, enemy = { x: 600, score: 0 };
+        let currentNetHeight = 50, player = { x: 150, score: 0 }, enemy = { x: 600, score: 0 };
         let ball = { x: 400, y: 100, dx: 0, dy: 0 };
         let isRunning = false, isWaiting = false, gameOver = false, isDemoMode = false, firstInputDone = false;
         let isTwoPlayerMode = false, matchSettled = false, winnerSide = null, gamepadIndex = null;
         let lastInputTime = Date.now(), netSoundCooldown = false, lastTime = performance.now(), blinkAccumulator = 0, demoUITimer = null;
-        let prevRawAxisX = 0, prevRawAxisY = 0, playerTargetOffset = 0, enemyTargetOffset = 0;
-        let inputCooldown = false;
+        let prevRawAxisX = 0, prevRawAxisY = 0, playerTargetOffset = 0, enemyTargetOffset = 0, inputCooldown = false;
 
         setInterval(() => { playerTargetOffset = (Math.random() - 0.5) * 60; enemyTargetOffset = (Math.random() - 0.5) * 60; }, 1000);
 
@@ -87,31 +82,51 @@
             for (let i = 0; i < 15; i++) { if (data[i] === 0) ctx.fillRect(x + (i % 3) * size, y + Math.floor(i / 3) * size, size, size); }
         }
 
-        window.addEventListener("gamepadconnected", (e) => { gamepadIndex = e.gamepad.index; });
-        window.addEventListener("gamepaddisconnected", () => { gamepadIndex = null; });
+        // --- タッチ操作管理 ---
+        function handleTouch(e) {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
 
+            for (let i = 0; i < e.touches.length; i++) {
+                const touch = e.touches[i];
+                const tx = (touch.clientX - rect.left) * scaleX;
+
+                if (!firstInputDone || isDemoMode || gameOver || !isRunning) {
+                    // スタート判定
+                    if (tx < canvas.width / 2) handleInput(1);
+                    else handleInput(2);
+                } else {
+                    // プレイ中の移動判定
+                    if (tx < canvas.width / 2) {
+                        player.x = Math.max(P1_MIN_X, Math.min(tx - PADDLE_WIDTH / 2, P1_MAX_X));
+                    } else if (isTwoPlayerMode) {
+                        enemy.x = Math.max(P2_MIN_X, Math.min(tx - PADDLE_WIDTH / 2, P2_MAX_X));
+                    }
+                    lastInputTime = Date.now();
+                }
+            }
+        }
+
+        window.addEventListener("touchstart", handleTouch, { passive: false });
+        window.addEventListener("touchmove", handleTouch, { passive: false });
+
+        // --- 他の入力系 ---
+        window.addEventListener("gamepadconnected", (e) => { gamepadIndex = e.gamepad.index; });
         function updateGamepad() {
             if (gamepadIndex === null) return;
             const gp = navigator.getGamepads()[gamepadIndex];
             if (!gp) return;
-            
             const rawX = gp.axes[0], rawY = gp.axes[1];
-            // 1P操作：可動範囲を修正
-            if (Math.abs(rawX - prevRawAxisX) > 0.01) {
-                if (firstInputDone && !isDemoMode) {
-                    player.x = P1_MIN_X + (P1_MAX_X - P1_MIN_X) * ((rawX + 1) / 2);
-                    lastInputTime = Date.now();
-                }
+            if (Math.abs(rawX - prevRawAxisX) > 0.01 && firstInputDone && !isDemoMode) {
+                player.x = P1_MIN_X + (P1_MAX_X - P1_MIN_X) * ((rawX + 1) / 2);
+                lastInputTime = Date.now();
             }
-            // 2P操作：可動範囲を修正
-            if (isTwoPlayerMode && Math.abs(rawY - prevRawAxisY) > 0.01) {
-                if (firstInputDone && !isDemoMode) {
-                    enemy.x = P2_MIN_X + (P2_MAX_X - P2_MIN_X) * ((rawY + 1) / 2);
-                    lastInputTime = Date.now();
-                }
+            if (isTwoPlayerMode && Math.abs(rawY - prevRawAxisY) > 0.01 && firstInputDone && !isDemoMode) {
+                enemy.x = P2_MIN_X + (P2_MAX_X - P2_MIN_X) * ((rawY + 1) / 2);
+                lastInputTime = Date.now();
             }
             prevRawAxisX = rawX; prevRawAxisY = rawY;
-
             if (gp.buttons[0]?.pressed) handleInput(1);
             if (gp.buttons[1]?.pressed) handleInput(2);
         }
@@ -128,21 +143,22 @@
             if (!audioInitialized) await initAudio();
             if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
             lastInputTime = Date.now();
-            const twoPlayer = (mode === 2);
-            if (!firstInputDone) { firstInputDone = true; initGame(twoPlayer); } 
-            else if (isDemoMode || gameOver || !isRunning) { stopDemo(); initGame(twoPlayer); }
-            inputCooldown = true;
-            setTimeout(() => inputCooldown = false, 500);
+            if (!firstInputDone || isDemoMode || gameOver || !isRunning) { 
+                stopDemo(); initGame(mode === 2); 
+            }
+            inputCooldown = true; setTimeout(() => inputCooldown = false, 500);
         }
 
-        window.addEventListener("mousedown", () => handleInput(1));
+        window.addEventListener("mousedown", (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const tx = (e.clientX - rect.left) * (canvas.width / rect.width);
+            handleInput(tx < canvas.width / 2 ? 1 : 2);
+        });
 
         window.addEventListener("mousemove", (e) => {
             if (!firstInputDone || isDemoMode || isTwoPlayerMode) return;
             const rect = canvas.getBoundingClientRect();
-            const scaleX = canvas.width / rect.width;
-            let newX = ((e.clientX - rect.left) * scaleX) - PADDLE_WIDTH / 2;
-            // 1Pマウス操作の制限値を修正
+            let newX = ((e.clientX - rect.left) * (canvas.width / rect.width)) - PADDLE_WIDTH / 2;
             player.x = Math.max(P1_MIN_X, Math.min(newX, P1_MAX_X));
             if (!matchSettled && !gameOver) lastInputTime = Date.now();
         });
@@ -182,11 +198,7 @@
                 if(!isDemoMode) { playBeep(150, 0.3); if (ball.x < canvas.width / 2) enemy.score++; else player.score++; }
                 resetBall(ball.x < canvas.width / 2 ? 'enemy' : 'player'); return;
             }
-            
-            // 敵の移動AIの制限範囲を修正
-            if (!isTwoPlayerMode || isDemoMode) {
-                autoMove(enemy, 600, P2_MIN_X, P2_MAX_X, dt);
-            }
+            if (!isTwoPlayerMode || isDemoMode) autoMove(enemy, 600, P2_MIN_X, P2_MAX_X, dt);
             if (isDemoMode) autoMove(player, 150, P1_MIN_X, P1_MAX_X, dt);
 
             [player, enemy].forEach(p => {
@@ -194,9 +206,9 @@
                     ball.dy = -9; ball.y = PADDLE_DISPLAY_Y - BALL_SIZE; ball.dx = (ball.x + BALL_SIZE/2 - (p.x + PADDLE_WIDTH/2)) * 0.4; if(!isDemoMode) playBeep(440, 0.03); 
                 }
             });
-            const netL = canvas.width / 2 - NET_WIDTH / 2, netR = canvas.width / 2 + NET_WIDTH / 2;
+            const netL = 400 - NET_WIDTH / 2, netR = 400 + NET_WIDTH / 2;
             if (ball.y + BALL_SIZE > GROUND_Y - currentNetHeight && ball.x + BALL_SIZE > netL && ball.x < netR) {
-                ball.dx *= -0.8; ball.x = (ball.x + BALL_SIZE/2 < canvas.width/2) ? netL - BALL_SIZE : netR;
+                ball.dx *= -0.8; ball.x = (ball.x + BALL_SIZE/2 < 400) ? netL - BALL_SIZE : netR;
                 if (!netSoundCooldown && !isDemoMode) { playBeep(200, 0.03); netSoundCooldown = true; setTimeout(() => netSoundCooldown = false, 150); }
             }
         }
@@ -204,15 +216,14 @@
         function autoMove(target, homeX, minX, maxX, dt) {
             let offset = (target === player) ? playerTargetOffset : enemyTargetOffset;
             let speedFactor = (isDemoMode ? 0.08 : 0.15) * dt;
-            if (ball.dx !== 0 && ((target === enemy && ball.x > canvas.width/2) || (target === player && ball.x < canvas.width/2))) {
+            if (ball.dx !== 0 && ((target === enemy && ball.x > 400) || (target === player && ball.x < 400))) {
                 target.x += (ball.x + BALL_SIZE/2 - PADDLE_WIDTH/2 + offset - target.x) * speedFactor;
             } else { target.x += (homeX - target.x) * 0.05 * dt; }
             target.x = Math.max(minX, Math.min(target.x, maxX));
         }
 
         function startDemo() {
-            isDemoMode = true; isRunning = true; matchSettled = false; gameOver = false;
-            resetBall('enemy');
+            isDemoMode = true; isRunning = true; matchSettled = false; gameOver = false; resetBall('enemy');
             demoUITimer = setTimeout(() => { if (isDemoMode) { msgDiv.innerHTML = "GAME OVER"; msgDiv.classList.add("blink"); msgDiv.style.display = "block"; } }, 2000);
         }
         function stopDemo() { if (demoUITimer) clearTimeout(demoUITimer); isDemoMode = false; msgDiv.style.display = "none"; msgDiv.classList.remove("blink"); }
@@ -222,19 +233,13 @@
             ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.fillStyle = "#fff";
             ctx.fillRect(0, 0, LINE_THICK, canvas.height); ctx.fillRect(canvas.width - LINE_THICK, 0, LINE_THICK, canvas.height); ctx.fillRect(0, GROUND_Y, canvas.width, LINE_THICK);
-            ctx.fillRect(canvas.width / 2 - NET_WIDTH / 2, GROUND_Y - currentNetHeight, NET_WIDTH, currentNetHeight);
-            
+            ctx.fillRect(400 - NET_WIDTH / 2, GROUND_Y - currentNetHeight, NET_WIDTH, currentNetHeight);
             const scoreMargin = LINE_THICK * 4;
             const isWinnerBlinking = !isDemoMode && (matchSettled || gameOver);
             drawPongDigit(player.score, scoreMargin, LINE_THICK, LINE_THICK, (isWinnerBlinking && winnerSide === 'player'));
             drawPongDigit(enemy.score, canvas.width - scoreMargin - (3 * LINE_THICK), LINE_THICK, LINE_THICK, (isWinnerBlinking && winnerSide === 'enemy'));
-
             ctx.fillRect(player.x, PADDLE_DISPLAY_Y, PADDLE_WIDTH, PADDLE_HEIGHT); ctx.fillRect(enemy.x, PADDLE_DISPLAY_Y, PADDLE_WIDTH, PADDLE_HEIGHT); ctx.fillRect(ball.x, ball.y, BALL_SIZE, BALL_SIZE);
-            
-            updateGamepad();
-            update(deltaTime); 
-            lastTime = currentTime; 
-            requestAnimationFrame(gameLoop);
+            updateGamepad(); update(deltaTime); lastTime = currentTime; requestAnimationFrame(gameLoop);
         }
         requestAnimationFrame(gameLoop);
     </script>
