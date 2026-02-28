@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>G-PONG - Tight Range Edition</title>
+    <link href="https://fonts.googleapis.com/css2?family=Michroma&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+        body { background-color: #000; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; width: 100vw; color: white; overflow: hidden; touch-action: none; }
+        .game-container { position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; padding: 15px; }
+        canvas { background-color: #000; max-width: 100%; max-height: 100%; aspect-ratio: 8 / 5; image-rendering: pixelated; outline: 15px solid #000; }
+        .overlay-text { position: absolute; text-align: center; pointer-events: none; width: 100%; font-family: 'Michroma', sans-serif; font-size: 22px; top: 48%; transform: translateY(-50%); z-index: 10; line-height: 1.5; }
+        .ui-panel { position: absolute; top: 30px; left: 30px; font-family: 'Michroma', sans-serif; font-size: 24px; color: rgba(255,255,255,0.7); pointer-events: none; opacity: 0; transition: opacity 0.1s; z-index: 20; }
+        .blink { animation: blink-animation 0.8s steps(2, start) infinite; }
+        @keyframes blink-animation { to { visibility: hidden; } }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        <div id="msg" class="overlay-text">PRESS START BUTTON<br><span style="font-size: 14px; color: #aaa;">(A: 1P / B: 2P)</span></div>
+        <div id="ui" class="ui-panel">4.5</div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        const msgDiv = document.getElementById("msg");
+        const uiDiv = document.getElementById("ui");
+        
+        let audioCtx = null, analyser = null, dataArray = null, audioInitialized = false;
+        let audioSensitivity = 4.5;
+
+        const LINE_THICK = 15, GRAVITY = 0.18, PADDLE_WIDTH = 70, PADDLE_HEIGHT = LINE_THICK;
+        const BALL_SIZE = LINE_THICK, NET_WIDTH = LINE_THICK;
+        const GROUND_Y = 500 - LINE_THICK, WINNING_SCORE = 5;
+        const IDLE_TIME_LIMIT = 30000;
+        const PADDLE_DISPLAY_Y = GROUND_Y - 45, WALL_L = LINE_THICK, WALL_R = 800 - LINE_THICK;
+
+        // --- 可動範囲の制限値 ---
+        const NET_MARGIN = 5; // ネットとの最小隙間
+        const P1_MIN_X = WALL_L;
+        const P1_MAX_X = canvas.width / 2 - PADDLE_WIDTH - NET_MARGIN; // 1Pの右限
+        const P2_MIN_X = canvas.width / 2 + NET_MARGIN;               // 2Pの左限
+        const P2_MAX_X = WALL_R - PADDLE_WIDTH;
+
+        let currentNetHeight = 50;
+        let player = { x: 150, score: 0 }, enemy = { x: 600, score: 0 };
+        let ball = { x: 400, y: 100, dx: 0, dy: 0 };
+        let isRunning = false, isWaiting = false, gameOver = false, isDemoMode = false, firstInputDone = false;
+        let isTwoPlayerMode = false, matchSettled = false, winnerSide = null, gamepadIndex = null;
+        let lastInputTime = Date.now(), netSoundCooldown = false, lastTime = performance.now(), blinkAccumulator = 0, demoUITimer = null;
+        let prevRawAxisX = 0, prevRawAxisY = 0, playerTargetOffset = 0, enemyTargetOffset = 0;
+        let inputCooldown = false;
+
+        setInterval(() => { playerTargetOffset = (Math.random() - 0.5) * 60; enemyTargetOffset = (Math.random() - 0.5) * 60; }, 1000);
+
+        async function initAudio() {
+            if (audioInitialized) return;
+            audioInitialized = true;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const source = audioCtx.createMediaStreamSource(stream);
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+            } catch (err) { console.warn("Mic access denied."); }
+        }
+
+        function playBeep(freq, duration) {
+            if (isDemoMode || !audioCtx) return;
+            try {
+                const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain();
+                osc.type = "square"; osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+                gain.gain.value = 0.08; osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(); osc.stop(audioCtx.currentTime + duration);
+            } catch(e) {}
+        }
+
+        function drawPongDigit(num, x, y, size, shouldBlink) {
+            if (shouldBlink && Math.floor(blinkAccumulator / 400) % 2 === 0) return;
+            const data = { 0: [0,0,0,0,1,0,0,1,0,0,1,0,0,0,0], 1: [1,1,0,1,1,0,1,1,0,1,1,0,1,1,0], 2: [0,0,0,1,1,0,0,0,0,0,1,1,0,0,0], 3: [0,0,0,1,1,0,0,0,0,1,1,0,0,0,0], 4: [0,1,0,0,1,0,0,0,0,1,1,0,1,1,0], 5: [0,0,0,0,1,1,0,0,0,1,1,0,0,0,0], 6: [0,0,0,0,1,1,0,0,0,0,1,0,0,0,0], 7: [0,0,0,1,1,0,1,1,0,1,1,0,1,1,0], 8: [0,0,0,0,1,0,0,0,0,0,1,0,0,0,0], 9: [0,0,0,0,1,0,0,0,0,1,1,0,0,0,0] }[num % 10];
+            ctx.fillStyle = "#fff"; 
+            for (let i = 0; i < 15; i++) { if (data[i] === 0) ctx.fillRect(x + (i % 3) * size, y + Math.floor(i / 3) * size, size, size); }
+        }
+
+        window.addEventListener("gamepadconnected", (e) => { gamepadIndex = e.gamepad.index; });
+        window.addEventListener("gamepaddisconnected", () => { gamepadIndex = null; });
+
+        function updateGamepad() {
+            if (gamepadIndex === null) return;
+            const gp = navigator.getGamepads()[gamepadIndex];
+            if (!gp) return;
+            
+            const rawX = gp.axes[0], rawY = gp.axes[1];
+            // 1P操作：可動範囲を修正
+            if (Math.abs(rawX - prevRawAxisX) > 0.01) {
+                if (firstInputDone && !isDemoMode) {
+                    player.x = P1_MIN_X + (P1_MAX_X - P1_MIN_X) * ((rawX + 1) / 2);
+                    lastInputTime = Date.now();
+                }
+            }
+            // 2P操作：可動範囲を修正
+            if (isTwoPlayerMode && Math.abs(rawY - prevRawAxisY) > 0.01) {
+                if (firstInputDone && !isDemoMode) {
+                    enemy.x = P2_MIN_X + (P2_MAX_X - P2_MIN_X) * ((rawY + 1) / 2);
+                    lastInputTime = Date.now();
+                }
+            }
+            prevRawAxisX = rawX; prevRawAxisY = rawY;
+
+            if (gp.buttons[0]?.pressed) handleInput(1);
+            if (gp.buttons[1]?.pressed) handleInput(2);
+        }
+
+        window.addEventListener("keydown", (e) => {
+            if (e.key === "ArrowUp") { audioSensitivity += 0.5; updateUI(true); }
+            else if (e.key === "ArrowDown") { audioSensitivity = Math.max(0, audioSensitivity - 0.5); updateUI(true); }
+        });
+        window.addEventListener("keyup", (e) => { if (e.key === "ArrowUp" || e.key === "ArrowDown") updateUI(false); });
+        function updateUI(visible) { uiDiv.textContent = audioSensitivity.toFixed(1); uiDiv.style.opacity = visible ? "1" : "0"; }
+
+        async function handleInput(mode) {
+            if (inputCooldown) return;
+            if (!audioInitialized) await initAudio();
+            if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+            lastInputTime = Date.now();
+            const twoPlayer = (mode === 2);
+            if (!firstInputDone) { firstInputDone = true; initGame(twoPlayer); } 
+            else if (isDemoMode || gameOver || !isRunning) { stopDemo(); initGame(twoPlayer); }
+            inputCooldown = true;
+            setTimeout(() => inputCooldown = false, 500);
+        }
+
+        window.addEventListener("mousedown", () => handleInput(1));
+
+        window.addEventListener("mousemove", (e) => {
+            if (!firstInputDone || isDemoMode || isTwoPlayerMode) return;
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            let newX = ((e.clientX - rect.left) * scaleX) - PADDLE_WIDTH / 2;
+            // 1Pマウス操作の制限値を修正
+            player.x = Math.max(P1_MIN_X, Math.min(newX, P1_MAX_X));
+            if (!matchSettled && !gameOver) lastInputTime = Date.now();
+        });
+
+        function initGame(twoPlayer = false) { 
+            if (demoUITimer) clearTimeout(demoUITimer); 
+            player.score = 0; enemy.score = 0; winnerSide = null; 
+            gameOver = false; isRunning = true; isDemoMode = false; matchSettled = false; 
+            isTwoPlayerMode = twoPlayer;
+            msgDiv.style.display = "none"; msgDiv.classList.remove("blink");
+            lastInputTime = Date.now(); resetBall('enemy'); 
+        }
+
+        function resetBall(winner) {
+            if (!isDemoMode && (player.score >= WINNING_SCORE || enemy.score >= WINNING_SCORE)) {
+                matchSettled = true; isRunning = false; winnerSide = player.score >= WINNING_SCORE ? 'player' : 'enemy';
+                setTimeout(() => { if (!isDemoMode) { gameOver = true; msgDiv.innerHTML = "GAME OVER"; msgDiv.style.display = "block"; } }, 3000);
+                return;
+            }
+            isWaiting = true; ball.x = (winner === 'player' ? 600 : 200); ball.y = 150; ball.dx = 0; ball.dy = 0;
+            setTimeout(() => { if (isRunning) { ball.dx = (winner === 'player' ? -1 : 1) * 4; isWaiting = false; if(!isDemoMode) playBeep(600, 0.03); } }, 2000);
+        }
+
+        function update(dt) {
+            blinkAccumulator += performance.now() - lastTime;
+            if (analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                let avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                currentNetHeight = 20 + (avg * audioSensitivity); 
+            }
+            if (firstInputDone && !isDemoMode && Date.now() - lastInputTime > IDLE_TIME_LIMIT) { startDemo(); return; }
+            if (!isRunning || isWaiting || gameOver || matchSettled) return;
+            ball.dy += GRAVITY * dt; ball.x += ball.dx * dt; ball.y += ball.dy * dt;
+            if (ball.x < WALL_L || ball.x + BALL_SIZE > WALL_R) { ball.dx *= -0.9; ball.x = ball.x < WALL_L ? WALL_L : WALL_R - BALL_SIZE; if(!isDemoMode) playBeep(300, 0.03); }
+            if (ball.y < 0) { ball.y = 0; ball.dy *= -1; if(!isDemoMode) playBeep(300, 0.03); }
+            if (ball.y + BALL_SIZE >= GROUND_Y) {
+                if(!isDemoMode) { playBeep(150, 0.3); if (ball.x < canvas.width / 2) enemy.score++; else player.score++; }
+                resetBall(ball.x < canvas.width / 2 ? 'enemy' : 'player'); return;
+            }
+            
+            // 敵の移動AIの制限範囲を修正
+            if (!isTwoPlayerMode || isDemoMode) {
+                autoMove(enemy, 600, P2_MIN_X, P2_MAX_X, dt);
+            }
+            if (isDemoMode) autoMove(player, 150, P1_MIN_X, P1_MAX_X, dt);
+
+            [player, enemy].forEach(p => {
+                if (ball.dy > 0 && ball.x + BALL_SIZE > p.x && ball.x < p.x + PADDLE_WIDTH && ball.y + BALL_SIZE > PADDLE_DISPLAY_Y && ball.y < PADDLE_DISPLAY_Y + PADDLE_HEIGHT) {
+                    ball.dy = -9; ball.y = PADDLE_DISPLAY_Y - BALL_SIZE; ball.dx = (ball.x + BALL_SIZE/2 - (p.x + PADDLE_WIDTH/2)) * 0.4; if(!isDemoMode) playBeep(440, 0.03); 
+                }
+            });
+            const netL = canvas.width / 2 - NET_WIDTH / 2, netR = canvas.width / 2 + NET_WIDTH / 2;
+            if (ball.y + BALL_SIZE > GROUND_Y - currentNetHeight && ball.x + BALL_SIZE > netL && ball.x < netR) {
+                ball.dx *= -0.8; ball.x = (ball.x + BALL_SIZE/2 < canvas.width/2) ? netL - BALL_SIZE : netR;
+                if (!netSoundCooldown && !isDemoMode) { playBeep(200, 0.03); netSoundCooldown = true; setTimeout(() => netSoundCooldown = false, 150); }
+            }
+        }
+
+        function autoMove(target, homeX, minX, maxX, dt) {
+            let offset = (target === player) ? playerTargetOffset : enemyTargetOffset;
+            let speedFactor = (isDemoMode ? 0.08 : 0.15) * dt;
+            if (ball.dx !== 0 && ((target === enemy && ball.x > canvas.width/2) || (target === player && ball.x < canvas.width/2))) {
+                target.x += (ball.x + BALL_SIZE/2 - PADDLE_WIDTH/2 + offset - target.x) * speedFactor;
+            } else { target.x += (homeX - target.x) * 0.05 * dt; }
+            target.x = Math.max(minX, Math.min(target.x, maxX));
+        }
+
+        function startDemo() {
+            isDemoMode = true; isRunning = true; matchSettled = false; gameOver = false;
+            resetBall('enemy');
+            demoUITimer = setTimeout(() => { if (isDemoMode) { msgDiv.innerHTML = "GAME OVER"; msgDiv.classList.add("blink"); msgDiv.style.display = "block"; } }, 2000);
+        }
+        function stopDemo() { if (demoUITimer) clearTimeout(demoUITimer); isDemoMode = false; msgDiv.style.display = "none"; msgDiv.classList.remove("blink"); }
+
+        function gameLoop(currentTime) {
+            let deltaTime = Math.min((currentTime - lastTime) / (1000 / 60), 2);
+            ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, LINE_THICK, canvas.height); ctx.fillRect(canvas.width - LINE_THICK, 0, LINE_THICK, canvas.height); ctx.fillRect(0, GROUND_Y, canvas.width, LINE_THICK);
+            ctx.fillRect(canvas.width / 2 - NET_WIDTH / 2, GROUND_Y - currentNetHeight, NET_WIDTH, currentNetHeight);
+            
+            const scoreMargin = LINE_THICK * 4;
+            const isWinnerBlinking = !isDemoMode && (matchSettled || gameOver);
+            drawPongDigit(player.score, scoreMargin, LINE_THICK, LINE_THICK, (isWinnerBlinking && winnerSide === 'player'));
+            drawPongDigit(enemy.score, canvas.width - scoreMargin - (3 * LINE_THICK), LINE_THICK, LINE_THICK, (isWinnerBlinking && winnerSide === 'enemy'));
+
+            ctx.fillRect(player.x, PADDLE_DISPLAY_Y, PADDLE_WIDTH, PADDLE_HEIGHT); ctx.fillRect(enemy.x, PADDLE_DISPLAY_Y, PADDLE_WIDTH, PADDLE_HEIGHT); ctx.fillRect(ball.x, ball.y, BALL_SIZE, BALL_SIZE);
+            
+            updateGamepad();
+            update(deltaTime); 
+            lastTime = currentTime; 
+            requestAnimationFrame(gameLoop);
+        }
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
